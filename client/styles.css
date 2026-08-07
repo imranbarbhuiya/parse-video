@@ -228,10 +228,24 @@ button {
 }
 
 .field select {
-	background: rgba(12, 17, 24, 0.7);
-	border: 1px solid var(--line-strong);
-	border-radius: 8px;
-	padding: 0.45rem 0.55rem;
+  background: rgba(12, 17, 24, 0.7);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+}
+
+.range-field input[type="number"] {
+  width: 4.5rem;
+  background: rgba(12, 17, 24, 0.7);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 0.45rem 0.5rem;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+.range-field input[type="number"]:focus {
+  border-color: var(--accent);
 }
 
 .status {

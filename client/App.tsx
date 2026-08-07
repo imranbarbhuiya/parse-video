@@ -64,6 +64,9 @@ export default function App() {
 	const [meta, setMeta] = useState<FramesPayload['meta']>();
 	const [index, setIndex] = useState(0);
 	const [error, setError] = useState<string | null>(null);
+	const [rangeFrom, setRangeFrom] = useState(1);
+	const [rangeTo, setRangeTo] = useState(1);
+	const [rangeBusy, setRangeBusy] = useState(false);
 	const fileRef = useRef<HTMLInputElement>(null);
 	const stripRef = useRef<HTMLDivElement>(null);
 	const activeThumbRef = useRef<HTMLButtonElement>(null);
@@ -82,6 +85,9 @@ export default function App() {
 		setFrames([]);
 		setMeta(undefined);
 		setIndex(0);
+		setRangeFrom(1);
+		setRangeTo(1);
+		setRangeBusy(false);
 		setError(null);
 		setBusy(false);
 		setUrl('');
@@ -159,6 +165,9 @@ export default function App() {
 					setFrames(payload.frames ?? []);
 					setMeta(payload.meta);
 					setIndex(0);
+					const total = payload.frames?.length ?? 0;
+					setRangeFrom(1);
+					setRangeTo(Math.max(1, total));
 					setBusy(false);
 				}
 			} catch (e) {
@@ -261,6 +270,39 @@ export default function App() {
 		a.click();
 		URL.revokeObjectURL(a.href);
 	};
+
+	const downloadRange = async () => {
+		if (!job?.id || !frames.length) return;
+		let from = Math.trunc(rangeFrom) || 1;
+		let to = Math.trunc(rangeTo) || frames.length;
+		from = Math.min(Math.max(1, from), frames.length);
+		to = Math.min(Math.max(1, to), frames.length);
+		if (from > to) [from, to] = [to, from];
+		setRangeFrom(from);
+		setRangeTo(to);
+		setRangeBusy(true);
+		setError(null);
+		try {
+			const res = await fetch(`/api/jobs/${job.id}/export?from=${from}&to=${to}`);
+			if (!res.ok) {
+				const data = (await res.json().catch(() => null)) as { error?: string } | null;
+				throw new Error(data?.error || `Export failed (${res.status})`);
+			}
+			const blob = await res.blob();
+			const a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			a.download = `frames_${from}-${to}.zip`;
+			a.click();
+			URL.revokeObjectURL(a.href);
+		} catch (e) {
+			setError(e instanceof Error ? e.message : String(e));
+		} finally {
+			setRangeBusy(false);
+		}
+	};
+
+	const clampRange = (value: number) => Math.min(Math.max(1, value), Math.max(1, frames.length));
+	const rangeCount = Math.max(0, Math.abs(Math.trunc(rangeTo) - Math.trunc(rangeFrom)) + 1);
 
 	const fps = meta?.fps ?? job?.fps;
 	const timestamp = fps && frames.length ? formatTime(index / fps) : '—';
@@ -441,6 +483,45 @@ export default function App() {
 							</button>
 							<button className="btn btn-ghost" onClick={() => void downloadFrame()}>
 								Download frame
+							</button>
+							<label className="field range-field">
+								From
+								<input
+									type="number"
+									min={1}
+									max={frames.length}
+									value={rangeFrom}
+									onChange={(e) => setRangeFrom(clampRange(Number(e.target.value) || 1))}
+								/>
+							</label>
+							<label className="field range-field">
+								To
+								<input
+									type="number"
+									min={1}
+									max={frames.length}
+									value={rangeTo}
+									onChange={(e) => setRangeTo(clampRange(Number(e.target.value) || 1))}
+								/>
+							</label>
+							<button
+								className="btn btn-ghost"
+								disabled={rangeBusy || !frames.length}
+								onClick={() => void downloadRange()}
+								title="Download frames From→To as a zip"
+							>
+								{rangeBusy ? 'Zipping…' : `Download ${rangeCount} as zip`}
+							</button>
+							<button
+								className="btn btn-ghost"
+								type="button"
+								onClick={() => {
+									setRangeFrom(index + 1);
+									setRangeTo(index + 1);
+								}}
+								title="Set range to current frame"
+							>
+								Use current
 							</button>
 							<span className="spacer" />
 							<span className="keys">

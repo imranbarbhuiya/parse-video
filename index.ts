@@ -10,6 +10,7 @@ const ROOT = import.meta.dirname;
 const DATA = join(ROOT, 'data');
 const UPLOADS = join(DATA, 'uploads');
 const FRAMES = join(DATA, 'frames');
+const TMP = join(DATA, 'tmp');
 const isDev = process.env.NODE_ENV !== 'production';
 
 type JobStatus = 'queued' | 'downloading' | 'extracting' | 'done' | 'error';
@@ -32,26 +33,34 @@ const jobs = new Map<string, Job>();
 
 await mkdir(UPLOADS, { recursive: true });
 await mkdir(FRAMES, { recursive: true });
+await mkdir(TMP, { recursive: true });
 
 function run(
 	cmd: string,
 	args: string[],
-	onStderr?: (chunk: string) => void,
+	opts?: { onStderr?: (chunk: string) => void; stdin?: string; cwd?: string },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+		const child = spawn(cmd, args, {
+			stdio: [opts?.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+			cwd: opts?.cwd,
+		});
 		let stdout = '';
 		let stderr = '';
-		child.stdout.on('data', (buf: Buffer) => {
+		child.stdout?.on('data', (buf: Buffer) => {
 			stdout += buf.toString();
 		});
-		child.stderr.on('data', (buf: Buffer) => {
+		child.stderr?.on('data', (buf: Buffer) => {
 			const s = buf.toString();
 			stderr += s;
-			onStderr?.(s);
+			opts?.onStderr?.(s);
 		});
 		child.on('error', reject);
 		child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+		if (opts?.stdin !== undefined) {
+			child.stdin?.write(opts.stdin);
+			child.stdin?.end();
+		}
 	});
 }
 
@@ -117,15 +126,17 @@ async function extractFrames(job: Job, videoPath: string, outDir: string, everyN
 	const { code, stderr } = await run(
 		'ffmpeg',
 		['-y', '-i', videoPath, ...fpsFilter, '-q:v', '2', join(outDir, 'frame_%06d.jpg')],
-		(chunk) => {
-			const m = chunk.match(/frame=\s*(\d+)/g);
-			if (m) {
-				const n = Number(m[m.length - 1]!.replace(/frame=\s*/, ''));
-				if (n > lastFrame) {
-					lastFrame = n;
-					job.progress = n;
+		{
+			onStderr: (chunk) => {
+				const m = chunk.match(/frame=\s*(\d+)/g);
+				if (m) {
+					const n = Number(m[m.length - 1]!.replace(/frame=\s*/, ''));
+					if (n > lastFrame) {
+						lastFrame = n;
+						job.progress = n;
+					}
 				}
-			}
+			},
 		},
 	);
 
@@ -317,6 +328,50 @@ const server = Bun.serve({
 						height: job.height,
 						fps: job.fps,
 						duration: job.duration,
+					},
+				});
+			},
+		},
+		'/api/jobs/:id/export': {
+			GET: async (req) => {
+				const job = jobs.get(req.params.id);
+				if (!job) return json({ error: 'Job not found' }, 404);
+				if (job.status !== 'done') return json({ error: 'Job not ready' }, 400);
+
+				const dir = join(FRAMES, job.id);
+				const files = (await readdir(dir)).filter((f) => f.endsWith('.jpg')).sort();
+				if (!files.length) return json({ error: 'No frames' }, 404);
+
+				const q = new URL(req.url).searchParams;
+				let from = Math.trunc(Number(q.get('from') ?? 1));
+				let to = Math.trunc(Number(q.get('to') ?? files.length));
+				if (!Number.isFinite(from)) from = 1;
+				if (!Number.isFinite(to)) to = files.length;
+				from = Math.min(Math.max(1, from), files.length);
+				to = Math.min(Math.max(1, to), files.length);
+				if (from > to) [from, to] = [to, from];
+
+				const slice = files.slice(from - 1, to);
+				const zipName = `frames_${from}-${to}.zip`;
+				const zipPath = join(TMP, `${job.id}_${from}-${to}_${Date.now()}.zip`);
+				const list = slice.map((f) => f).join('\n') + '\n';
+
+				const { code, stderr } = await run('zip', ['-q', '-j', zipPath, '-@'], {
+					cwd: dir,
+					stdin: list,
+				});
+				if (code !== 0 || !existsSync(zipPath)) {
+					return json({ error: `zip failed: ${stderr.slice(-400) || 'unknown'}` }, 500);
+				}
+
+				const body = await Bun.file(zipPath).arrayBuffer();
+				void rm(zipPath, { force: true });
+
+				return new Response(body, {
+					headers: {
+						'Content-Type': 'application/zip',
+						'Content-Disposition': `attachment; filename="${zipName}"`,
+						'Content-Length': String(body.byteLength),
 					},
 				});
 			},
